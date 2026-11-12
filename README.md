@@ -1,12 +1,14 @@
 # CodexCodeCheck
 
-CodexCodeCheck 是一个可以和 Codex 并排打开的 Windows 小窗口。Codex 改完代码后，点「刷新」就能看到哪些文件变了。可以自己逐个看差异，也可以让 Codex 审一遍，点审查意见跳到对应的行，再把意见复制回聊天。
+CodexCodeCheck 是一个吸附在 Codex 桌面端旁的半透明 Windows 代码窗口。它会展开项目文件树，自动打开最近修改的文件。可以自己逐个看差异，也可以让 Codex 审一遍，点审查意见跳到对应的行，再把意见复制回聊天。
 
 ## 怎么用
 
-1. 双击 `Launch.cmd`。第一次打开会准备 Electron，有可用的缓存就直接用。
-2. 选中 Codex 正在改的 Git 仓库目录。如果 Codex 用的是独立 worktree，就选那个 worktree。窗口会记住上次选的目录。
-3. 想边看边聊，可以打开「置顶」。每次改完代码，点「刷新」更新文件列表。
+1. 打开 Codex 桌面端，再双击 `Launch.cmd`。第一次打开会准备 Electron，有可用的缓存就直接用。
+2. 拖动标题栏靠近 Codex 的任一边缘，松手时会吸到内侧或外侧。左外侧可以留少量窗口在屏幕外。吸附位置和窗口大小会在下次启动时恢复。点「吸附」解除后可自由摆放。
+3. 「文件」显示项目树，「改动」列出 Git 差异。工作区文件变化后，窗口会自动展开对应目录并打开文件。查看历史范围或运行审查时，自动跳转会等你回到工作区视图。
+
+自动跟随使用 Codex 桌面端本地状态中的选中项目，需要能解析到唯一的本地项目根目录。会话使用独立 worktree 时，请用左上角的项目按钮选择该目录。手动选择后可点「跟随」恢复自动切换。
 
 也可以从 PowerShell 直接打开指定仓库：
 
@@ -14,7 +16,7 @@ CodexCodeCheck 是一个可以和 Codex 并排打开的 Windows 小窗口。Code
 .\Launch.cmd 'D:\path\to\repo'
 ```
 
-需要 Windows x64 或 ARM64，以及 PATH 中可用的 Git。要运行 Codex 审查，还需要已登录且支持 `codex exec --output-schema` 的 Codex CLI。启动器会从 PATH 和 Codex 桌面安装目录查找 CLI，也可以用 `CODEX_REVIEW_CLI` 指定 `codex.exe` 的路径。
+需要 Windows x64 或 ARM64。查看 Git 差异需要 PATH 中可用的 Git。要运行 Codex 审查，还需要已登录且支持 `codex exec --output-schema` 的 Codex CLI。启动器会从 PATH 和 Codex 桌面安装目录查找 CLI，也可以用 `CODEX_REVIEW_CLI` 指定 `codex.exe` 的路径。
 
 ## 能看哪些改动
 
@@ -36,6 +38,6 @@ CodexCodeCheck 是一个可以和 Codex 并排打开的 Windows 小窗口。Code
 node --test
 ```
 
-运行测试需要 Node.js 22 或更新版本。Git 读取在 `lib/git.cjs`，CLI 调用在 `lib/review.cjs`，界面在 `ui/`。
+运行测试需要 Node.js 22 或更新版本。Git 读取在 `lib/git.cjs`，项目树和文件监听在 `lib/project-files.cjs`，窗口识别在 `lib/windows-dock.cjs`，界面在 `ui/`。
 
 参考：[OpenAI 官方 Codex CLI 命令文档](https://learn.chatgpt.com/docs/cli/reference#codex-exec)。

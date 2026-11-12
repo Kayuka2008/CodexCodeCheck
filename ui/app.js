@@ -7,6 +7,14 @@ const state = {
   repo: null,
   snapshot: null,
   selected: null,
+  selectedPath: null,
+  view: null,
+  tree: new Map(),
+  expanded: new Set(),
+  explorer: 'tree',
+  dock: null,
+  pendingContext: null,
+  pendingActivity: null,
   result: null,
   loading: false,
   choosing: false,
@@ -17,6 +25,7 @@ const state = {
   reviewMessage: '',
   reviewError: false,
   repoEpoch: 0,
+  treeRevealEpoch: 0,
   patchEpoch: 0,
   reviewEpoch: 0,
 };
@@ -45,17 +54,24 @@ function needsRef() {
   return $('scope').value === 'base' || $('scope').value === 'commit';
 }
 
+function hasGit() {
+  return Boolean(state.repo && state.repo.isGit !== false);
+}
+
 function updateControls() {
   const locked = state.loading || state.choosing || state.reviewing;
   const available = Boolean(state.repo);
   $('repository-picker').disabled = state.choosing || state.reviewing;
-  $('scope').disabled = !available || locked;
+  $('scope').disabled = !hasGit() || locked;
+  $('scope').hidden = available && !hasGit();
+  document.querySelector('.scope-label').hidden = $('scope').hidden;
   $('scope').querySelector('[value="base"]').disabled = !state.repo?.hasHead;
   $('ref').disabled = !available || locked;
   $('ref').hidden = !needsRef();
   $('ref').placeholder = $('scope').value === 'commit' ? '提交 SHA 或引用' : '例如 main';
   $('refresh').disabled = !available || locked || (needsRef() && !$('ref').value.trim());
   $('refresh-text').textContent = state.loading ? '读取中…' : '刷新';
+  $('changes-tab').disabled = !hasGit();
   $('file-filter').disabled = !state.snapshot?.files.length;
   $('review-start').disabled = locked || !state.codexAvailable || !state.snapshot?.files.length;
   $('review-start').hidden = state.reviewing;
@@ -67,7 +83,7 @@ function updateControls() {
 function setReviewStatus() {
   let message = state.reviewMessage;
   if (!message) {
-    if (!state.repo) message = '选择 Git 仓库后可开始审查。';
+    if (!hasGit()) message = '打开 Git 仓库后可审查改动。';
     else if (!state.codexAvailable) message = '未找到 Codex CLI。安装 Codex 后重新打开审查台。';
     else if (!state.snapshot) message = '读取改动后可开始审查。';
     else if (!state.snapshot.files.length) message = '这个范围没有需要审查的改动。';
@@ -80,9 +96,10 @@ function setReviewStatus() {
 }
 
 function emptyDiff(title, message) {
-  $('diff-title').textContent = '代码差异';
+  $('diff-title').textContent = '代码';
   $('diff-title').title = '';
   $('diff-totals').hidden = true;
+  $('source-toggle').hidden = true;
   const wrapper = element('div', 'empty-diff');
   const content = element('div');
   content.append(element('strong', '', title));
@@ -93,15 +110,17 @@ function emptyDiff(title, message) {
 
 function showSnapshotPlaceholder() {
   if (!state.repo) {
-    emptyDiff('选择 Git 仓库', '打开 Codex 正在处理的仓库或 worktree 文件夹，即可查看改动。');
+    emptyDiff('等待 Codex 项目', '打开 Codex 会话，或手动选择文件夹。');
   } else if (state.loading) {
     emptyDiff('正在读取改动…');
   } else if (state.snapshotError) {
     emptyDiff('无法读取改动', state.snapshotError);
   } else if (!state.snapshot && needsRef()) {
     emptyDiff($('scope').value === 'base' ? '输入对比分支' : '输入提交引用', '输入后按 Enter 或点击刷新。');
-  } else if (!state.snapshot?.files.length) {
-    emptyDiff('没有改动', '切换范围，或在代码更新后刷新。');
+  } else if (state.explorer === 'changes' && !state.snapshot?.files.length) {
+    emptyDiff('没有改动');
+  } else {
+    emptyDiff('选择文件');
   }
 }
 
@@ -109,6 +128,137 @@ function appendStats(container, file) {
   if (Number.isFinite(file.additions)) container.append(element('span', 'added', `+${file.additions}`));
   if (Number.isFinite(file.deletions)) container.append(element('span', 'removed', `−${file.deletions}`));
   container.hidden = !container.childElementCount;
+}
+
+function setExplorer(view) {
+  state.explorer = view;
+  const tree = view === 'tree';
+  $('tree-tab').setAttribute('aria-pressed', String(tree));
+  $('changes-tab').setAttribute('aria-pressed', String(!tree));
+  $('tree-list').hidden = !tree;
+  $('file-list').hidden = tree;
+  $('file-search').hidden = tree;
+  if (tree) renderTree();
+}
+
+function renderTree() {
+  if (state.explorer !== 'tree') return;
+  const list = $('tree-list');
+  const focused = list.contains(document.activeElement) ? document.activeElement.dataset.path : null;
+  const scrollTop = list.scrollTop;
+  const changed = new Map((state.snapshot?.files ?? []).map((file) => [normalizedPath(file.path), file]));
+  const selected = state.selectedPath ? normalizedPath(state.selectedPath) : null;
+
+  function directoryContent(directory) {
+    const fragment = document.createDocumentFragment();
+    const data = state.tree.get(directory);
+    if (!data?.entries) {
+      fragment.append(element('p', 'tree-message', data?.error || '正在读取…'));
+      return fragment;
+    }
+    if (!data.entries.length) fragment.append(element('p', 'tree-message', '空文件夹'));
+    for (const entry of data.entries) {
+      const isDirectory = entry.type === 'directory';
+      const open = isDirectory && state.expanded.has(entry.path);
+      const branch = element('div', 'tree-branch');
+      const button = element('button', 'tree-row');
+      button.type = 'button';
+      button.dataset.path = entry.path;
+      button.dataset.type = entry.type;
+      button.title = entry.path;
+      const toggle = element('span', 'tree-toggle', isDirectory ? (open ? '▾' : '▸') : '');
+      toggle.setAttribute('aria-hidden', 'true');
+      const icon = element('span', `tree-icon ${isDirectory ? 'tree-folder' : 'tree-file'}`);
+      icon.setAttribute('aria-hidden', 'true');
+      button.append(toggle, icon, element('span', 'tree-name', entry.name));
+      if (isDirectory) {
+        button.setAttribute('aria-expanded', String(open));
+      } else {
+        button.setAttribute('aria-current', String(normalizedPath(entry.path) === selected));
+        const file = changed.get(normalizedPath(entry.path));
+        if (file) {
+          const badge = element('span', 'tree-status', file.status);
+          badge.dataset.status = file.status;
+          badge.title = statusNames[file.status] || file.status;
+          button.append(badge);
+        }
+      }
+      branch.append(button);
+      if (open) {
+        const children = element('div', 'tree-children');
+        children.append(directoryContent(entry.path));
+        branch.append(children);
+      }
+      fragment.append(branch);
+    }
+    if (data.truncated) fragment.append(element('p', 'tree-message', '仅显示部分文件'));
+    return fragment;
+  }
+
+  list.replaceChildren(state.repo ? directoryContent('') : element('p', 'tree-message', '等待打开项目'));
+  list.scrollTop = scrollTop;
+  if (focused) treeRow(focused)?.focus({ preventScroll: true });
+}
+
+function treeRow(path) {
+  const key = normalizedPath(path);
+  return [...$('tree-list').querySelectorAll('.tree-row')].find((row) => normalizedPath(row.dataset.path) === key);
+}
+
+function loadDirectory(directory, reload = false) {
+  if (!state.repo) return Promise.resolve();
+  const tree = state.tree;
+  const cached = tree.get(directory);
+  if (cached?.pending) return cached.pending;
+  if (cached?.entries && !reload) return Promise.resolve();
+  const entry = { entries: cached?.entries };
+  tree.set(directory, entry);
+  entry.pending = Promise.resolve().then(async () => {
+    try {
+      if (tree !== state.tree) return;
+      const data = await api.tree(directory);
+      entry.entries = data.entries;
+      entry.truncated = data.truncated;
+    } catch (error) {
+      entry.error = describe(error);
+      entry.entries = null;
+    } finally {
+      entry.pending = null;
+      if (tree === state.tree) renderTree();
+    }
+  });
+  return entry.pending;
+}
+
+function toggleDirectory(path, open = !state.expanded.has(path)) {
+  if (open) {
+    state.expanded.add(path);
+    void loadDirectory(path);
+  } else {
+    state.expanded.delete(path);
+  }
+  renderTree();
+}
+
+async function revealTreePath(path, reload = false) {
+  const tree = state.tree;
+  const reveal = ++state.treeRevealEpoch;
+  const components = path.split('/');
+  let directory = '';
+  await loadDirectory('', reload);
+  for (const component of components.slice(0, -1)) {
+    if (tree !== state.tree || reveal !== state.treeRevealEpoch) return;
+    const found = tree.get(directory)?.entries?.find((entry) => entry.type === 'directory' &&
+      normalizedPath(entry.name) === normalizedPath(component));
+    if (!found) break;
+    directory = found.path;
+    state.expanded.add(directory);
+    await loadDirectory(directory, reload);
+  }
+  if (tree === state.tree && reveal === state.treeRevealEpoch) {
+    renderTree();
+    treeRow(path)?.scrollIntoView({ block: 'nearest' });
+  }
 }
 
 function renderFiles() {
@@ -154,37 +304,81 @@ function renderFiles() {
   list.replaceChildren(fragment);
 }
 
-function fileHeader(file) {
-  $('diff-title').textContent = file.path;
-  $('diff-title').title = file.oldPath ? `${file.oldPath} → ${file.path}` : file.path;
+function fileHeader(path, file) {
+  $('diff-title').textContent = path;
+  $('diff-title').title = file?.oldPath ? `${file.oldPath} → ${path}` : path;
   const totals = $('diff-totals');
   totals.replaceChildren();
-  appendStats(totals, file);
+  if (file) appendStats(totals, file);
+  else totals.hidden = true;
+  $('source-toggle').hidden = !file || file.status === 'D';
+  $('source-toggle').textContent = state.view === 'source' ? '差异' : '源码';
 }
 
-function selectFileRow(fileId) {
+function markSelection() {
   for (const row of $('file-list').querySelectorAll('.file-row')) {
-    row.setAttribute('aria-current', String(row.dataset.id === String(fileId)));
+    row.setAttribute('aria-current', String(row.dataset.id === String(state.selected)));
+  }
+  for (const row of $('tree-list').querySelectorAll('.tree-row[data-type="file"]')) {
+    row.setAttribute('aria-current', String(normalizedPath(row.dataset.path) === normalizedPath(state.selectedPath || '')));
+  }
+}
+
+function selectPath(path, { source = false } = {}) {
+  const file = findChangedFile(path);
+  return file && (!source || file.status === 'D') ? selectFile(file) : openSource(path);
+}
+
+async function openSource(path, line) {
+  if (!state.repo) return;
+  const request = ++state.patchEpoch;
+  const file = findChangedFile(path);
+  state.selected = file?.id ?? null;
+  state.selectedPath = path;
+  state.view = 'source';
+  markSelection();
+  emptyDiff('正在读取源码…');
+  fileHeader(path, file);
+  try {
+    const source = await api.readFile(path);
+    if (request !== state.patchEpoch) return;
+    if (source.binary || !source.text) {
+      emptyDiff(source.binary ? '二进制文件' : '空文件');
+      fileHeader(path, file);
+      return;
+    }
+    renderSource(source);
+    if (line) locateLine(line);
+  } catch (error) {
+    if (request !== state.patchEpoch) return;
+    emptyDiff('无法读取源码', describe(error));
+    fileHeader(path, file);
   }
 }
 
 async function selectFile(file, line) {
   if (state.loading || !state.snapshot || !state.snapshot.files.includes(file)) return;
-  if (state.selected === file.id && $('diff-body').querySelector('.diff-table')) {
+  if (state.view === 'diff' && state.selected === file.id && $('diff-body').querySelector('.diff-table')) {
     if (line) locateLine(line);
     return;
   }
   const request = ++state.patchEpoch;
   state.selected = file.id;
-  selectFileRow(file.id);
+  state.selectedPath = file.path;
+  state.view = 'diff';
+  markSelection();
   emptyDiff('正在读取差异…');
-  fileHeader(file);
+  fileHeader(file.path, file);
   try {
     const patch = await api.patch(file.id);
     if (request !== state.patchEpoch) return;
     if (!patch.text) {
-      emptyDiff('没有可显示的文本差异', '文件可能只有属性变化，或已在刷新后改变。');
-      fileHeader(file);
+      if (file.status !== 'D') {
+        await openSource(file.path, line);
+        return;
+      }
+      emptyDiff('没有可显示的文本差异');
+      fileHeader(file.path, file);
     } else {
       renderPatch(patch);
     }
@@ -192,7 +386,7 @@ async function selectFile(file, line) {
   } catch (error) {
     if (request !== state.patchEpoch) return;
     emptyDiff('无法读取差异', describe(error));
-    fileHeader(file);
+    fileHeader(file.path, file);
   }
 }
 
@@ -262,13 +456,34 @@ function renderPatch(patch) {
   body.scrollLeft = 0;
 }
 
+function renderSource(source) {
+  const table = element('div', 'diff-table source-table');
+  const lines = source.text.replace(/\r\n/g, '\n').split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  const maxRows = 5000;
+  let cropped = source.truncated || lines.length > maxRows;
+  for (const [index, raw] of lines.slice(0, maxRows).entries()) {
+    const line = raw.length > 5000 ? `${raw.slice(0, 5000)}…` : raw;
+    cropped ||= raw.length > 5000;
+    const row = element('div', 'diff-row source-row');
+    row.dataset.line = String(index + 1);
+    row.append(element('span', 'line-number', String(index + 1)), element('span', 'line-code', line));
+    table.append(row);
+  }
+  const body = $('diff-body');
+  body.replaceChildren(table);
+  if (cropped) body.append(element('p', 'diff-notice', '源码过长，已截断预览。'));
+  body.scrollTop = 0;
+  body.scrollLeft = 0;
+}
+
 function locateLine(line) {
   const body = $('diff-body');
   body.querySelector('.located')?.classList.remove('located');
   const number = Number(line);
   const row = Number.isSafeInteger(number) && number > 0 ? body.querySelector(`[data-line="${number}"]`) : null;
   if (!row) {
-    status(`第 ${line} 行不在当前差异中。`);
+    status(`第 ${line} 行不在当前${state.view === 'source' ? '预览' : '差异'}中。`);
     return;
   }
   row.classList.add('located');
@@ -284,26 +499,25 @@ function clearResult() {
   $('review-results').replaceChildren();
 }
 
-function clearSnapshot() {
+function clearSnapshot(keepResult = false) {
   ++state.patchEpoch;
   state.snapshot = null;
   state.selected = null;
   state.snapshotError = '';
-  clearResult();
+  if (!keepResult) clearResult();
 }
 
-async function refresh() {
-  if (!state.repo || state.loading || state.choosing || state.reviewing) return;
+async function refresh({ targetPath, activity = false } = {}) {
+  if (!hasGit() || state.loading || state.choosing || state.reviewing) return;
   const mode = $('scope').value;
   const ref = needsRef() ? $('ref').value.trim() : '';
   if (needsRef() && !ref) return;
   const epoch = state.repoEpoch;
-  const selectedPath = state.snapshot?.files.find((file) => file.id === state.selected)?.path;
-  clearSnapshot();
+  clearSnapshot(activity);
   state.loading = true;
   updateControls();
   renderFiles();
-  showSnapshotPlaceholder();
+  if (!state.selectedPath) showSnapshotPlaceholder();
   setReviewStatus();
   status('正在读取 Git 改动…');
 
@@ -311,7 +525,7 @@ async function refresh() {
     const snapshot = await api.snapshot(mode, ref);
     if (epoch !== state.repoEpoch) return;
     if (snapshot.repository) {
-      state.repo = snapshot.repository;
+      state.repo = { ...state.repo, ...snapshot.repository };
       renderRepository();
     }
     state.snapshot = snapshot;
@@ -325,28 +539,56 @@ async function refresh() {
       state.loading = false;
       updateControls();
       renderFiles();
+      renderTree();
+      if (activity && state.result) {
+        state.reviewMessage = '代码已更新，以下是上次审查结果。';
+        renderResult();
+      }
       setReviewStatus();
-      const files = state.snapshot?.files ?? [];
-      const selected = files.find((file) => file.path === selectedPath) ?? files[0];
-      if (selected) void selectFile(selected);
-      else showSnapshotPlaceholder();
+      const selectedPath = targetPath || state.selectedPath;
+      const file = selectedPath && findChangedFile(selectedPath);
+      if (selectedPath && (mode === 'worktree' || file)) {
+        const source = !activity && !targetPath && mode === 'worktree' && state.view === 'source';
+        void selectPath(selectedPath, { source });
+      } else if (state.snapshot?.files.length) {
+        const first = state.snapshot.files[0];
+        if (state.explorer === 'tree') void revealTreePath(first.path);
+        void selectFile(first);
+      } else {
+        state.view = null;
+        showSnapshotPlaceholder();
+      }
+      flushActivity();
     }
   }
 }
 
-function renderRepository() {
-  const repo = state.repo;
-  $('repository-name').textContent = repo?.name || '选择仓库';
-  $('repository-picker').title = repo?.root || '打开 Git 仓库';
-  $('branch-name').textContent = repo?.branch || '分离 HEAD';
-  $('branch').title = repo?.branch || '分离 HEAD';
-  $('branch').hidden = !repo;
+function refreshView() {
+  if (!state.repo) return;
+  if (state.selectedPath) void revealTreePath(state.selectedPath, true);
+  else void loadDirectory('', true);
+  if (hasGit()) void refresh();
+  else if (state.selectedPath) void openSource(state.selectedPath);
 }
 
-async function useRepository(repo) {
+function renderRepository() {
+  const repo = state.repo;
+  $('repository-name').textContent = repo?.name || '选择项目';
+  $('repository-picker').title = repo?.root || '手动选择项目文件夹';
+  $('branch-name').textContent = repo?.branch || '分离 HEAD';
+  $('branch').title = repo?.branch || '分离 HEAD';
+  $('branch').hidden = !hasGit();
+}
+
+async function useRepository(repo, latestPath) {
   ++state.repoEpoch;
   ++state.reviewEpoch;
   state.repo = repo;
+  state.tree = new Map();
+  state.expanded = new Set();
+  state.selectedPath = null;
+  state.view = null;
+  state.pendingActivity = null;
   state.loading = false;
   state.reviewing = false;
   state.cancelling = false;
@@ -357,12 +599,56 @@ async function useRepository(repo) {
   renderRepository();
   updateControls();
   renderFiles();
+  setExplorer('tree');
   setReviewStatus();
-  if (repo) await refresh();
-  else {
-    showSnapshotPlaceholder();
-    status('等待打开 Git 仓库');
+  showSnapshotPlaceholder();
+  if (!repo) {
+    status('等待当前会话项目');
+    return;
   }
+  status('已打开项目');
+  const path = relativeActivityPath(latestPath);
+  if (path) void revealTreePath(path);
+  else void loadDirectory('');
+  if (hasGit()) await refresh({ targetPath: path });
+  else if (path) await openSource(path);
+}
+
+function updateProject(payload) {
+  const context = payload && Object.hasOwn(payload, 'repository') ? payload : { repository: payload };
+  if (state.reviewing || state.choosing) {
+    state.pendingContext = context;
+    return;
+  }
+  state.pendingContext = null;
+  void useRepository(context.repository, context.latestPath);
+}
+
+function relativeActivityPath(path) {
+  return typeof path === 'string' && path ? path.replace(/\\/g, '/') : null;
+}
+
+function projectActivity(activity) {
+  const path = relativeActivityPath(activity?.path);
+  if (!path) return;
+  if (state.pendingContext && activity.root && state.pendingContext.repository &&
+      normalizedPath(activity.root) === normalizedPath(state.pendingContext.repository.root)) {
+    state.pendingContext.latestPath = path;
+    return;
+  }
+  if (!state.repo || (activity.root && normalizedPath(activity.root) !== normalizedPath(state.repo.root))) return;
+  state.pendingActivity = path;
+  flushActivity();
+}
+
+function flushActivity() {
+  if (!state.repo || state.reviewing || state.loading || state.choosing || $('scope').value !== 'worktree') return;
+  const path = state.pendingActivity;
+  if (!path) return;
+  state.pendingActivity = null;
+  void revealTreePath(path, true);
+  if (hasGit()) void refresh({ targetPath: path, activity: true });
+  else void openSource(path);
 }
 
 async function chooseRepository() {
@@ -378,7 +664,14 @@ async function chooseRepository() {
     state.choosing = false;
     updateControls();
   }
-  if (repo) await useRepository(repo);
+  if (repo) {
+    const returned = Object.hasOwn(repo, 'repository') ? repo.repository : repo;
+    const queued = state.pendingContext?.repository;
+    updateProject(queued && returned && normalizedPath(queued.root) === normalizedPath(returned.root)
+      ? state.pendingContext : repo);
+  }
+  else if (state.pendingContext) updateProject(state.pendingContext);
+  else flushActivity();
 }
 
 function scopeChanged() {
@@ -386,10 +679,13 @@ function scopeChanged() {
   $('ref').value = '';
   updateControls();
   renderFiles();
+  renderTree();
   showSnapshotPlaceholder();
   setReviewStatus();
-  if (!needsRef()) void refresh();
-  else {
+  if (!needsRef()) {
+    if ($('scope').value === 'worktree' && state.pendingActivity) flushActivity();
+    else void refresh();
+  } else {
     status('输入分支或提交引用');
     $('ref').focus();
   }
@@ -438,6 +734,8 @@ function renderFinding(finding) {
     jump.addEventListener('click', () => {
       $('file-filter').value = '';
       renderFiles();
+      if (window.matchMedia('(max-width: 640px)').matches) setReviewPanel(false);
+      void revealTreePath(file.path);
       void selectFile(file, finding.line);
     });
     actions.append(jump);
@@ -498,6 +796,8 @@ async function runReview() {
       state.cancelling = false;
       updateControls();
       setReviewStatus();
+      if (state.pendingContext) updateProject(state.pendingContext);
+      else flushActivity();
     }
   }
 }
@@ -518,12 +818,26 @@ async function cancelReview() {
   }
 }
 
-async function togglePin() {
-  const button = $('pin');
-  const requested = button.getAttribute('aria-pressed') !== 'true';
+function renderDock(dock) {
+  if (!dock) return;
+  state.dock = dock;
+  const button = $('dock');
+  const paused = dock.following === false && dock.enabled;
+  button.setAttribute('aria-pressed', String(dock.enabled && !paused));
+  button.title = paused ? '恢复跟随 Codex 会话项目' : dock.enabled ? '解除吸附。拖动标题栏可换到 Codex 的内侧或外侧边缘。' : '吸附到 Codex 窗口';
+  $('dock-label').textContent = paused ? '跟随' : '吸附';
+  const label = dock.status || (dock.attached ? '已吸附' : dock.enabled ? '等待 Codex' : '未吸附');
+  $('dock-status-text').textContent = label;
+  $('dock-status').title = label;
+  $('dock-status').classList.toggle('available', dock.attached);
+}
+
+async function toggleDock() {
+  const button = $('dock');
+  const requested = !state.dock?.enabled || state.dock.following === false;
   button.disabled = true;
   try {
-    button.setAttribute('aria-pressed', String(await api.setAlwaysOnTop(requested)));
+    renderDock(await api.setDocked(requested));
   } catch (error) {
     status(describe(error), true);
   } finally {
@@ -531,14 +845,51 @@ async function togglePin() {
   }
 }
 
+function treeKeydown(event) {
+  if (!event.target.matches('.tree-row')) return;
+  const row = event.target;
+  const path = row.dataset.path;
+  const isDirectory = row.dataset.type === 'directory';
+  if (event.key === 'ArrowRight' && isDirectory) {
+    event.preventDefault();
+    if (!state.expanded.has(path)) toggleDirectory(path, true);
+    else row.parentElement.querySelector('.tree-children .tree-row')?.focus();
+  } else if (event.key === 'ArrowLeft') {
+    event.preventDefault();
+    if (isDirectory && state.expanded.has(path)) toggleDirectory(path, false);
+    else treeRow(path.slice(0, path.lastIndexOf('/')))?.focus();
+  } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+    event.preventDefault();
+    const rows = [...$('tree-list').querySelectorAll('.tree-row')];
+    const index = rows.indexOf(row);
+    if (event.key === 'Home') rows[0]?.focus();
+    else if (event.key === 'End') rows.at(-1)?.focus();
+    else rows[index + (event.key === 'ArrowDown' ? 1 : -1)]?.focus();
+  }
+}
+
 async function initialize() {
   $('repository-picker').addEventListener('click', () => void chooseRepository());
-  $('pin').addEventListener('click', () => void togglePin());
+  $('dock').addEventListener('click', () => void toggleDock());
+  $('window-close').addEventListener('click', () => void api.closeWindow().catch((error) => status(describe(error), true)));
+  $('tree-tab').addEventListener('click', () => setExplorer('tree'));
+  $('changes-tab').addEventListener('click', () => setExplorer('changes'));
+  $('tree-list').addEventListener('click', (event) => {
+    const row = event.target.closest('.tree-row');
+    if (!row) return;
+    if (row.dataset.type === 'directory') toggleDirectory(row.dataset.path);
+    else void selectPath(row.dataset.path);
+  });
+  $('tree-list').addEventListener('keydown', treeKeydown);
+  $('source-toggle').addEventListener('click', () => {
+    if (state.selectedPath) void selectPath(state.selectedPath, { source: state.view === 'diff' });
+  });
   $('scope').addEventListener('change', scopeChanged);
   $('ref').addEventListener('input', () => {
     if (state.snapshot || state.snapshotError) {
       clearSnapshot();
       renderFiles();
+      renderTree();
       showSnapshotPlaceholder();
       setReviewStatus();
       status('按 Enter 或点击刷新以读取新的引用。');
@@ -547,7 +898,7 @@ async function initialize() {
   });
   $('scope-form').addEventListener('submit', (event) => {
     event.preventDefault();
-    void refresh();
+    refreshView();
   });
   $('file-filter').addEventListener('input', renderFiles);
   $('file-list').addEventListener('keydown', (event) => {
@@ -567,7 +918,7 @@ async function initialize() {
   document.addEventListener('keydown', (event) => {
     if (event.ctrlKey && !event.altKey && event.key.toLowerCase() === 'r') {
       event.preventDefault();
-      if (!$('refresh').disabled) void refresh();
+      if (!$('refresh').disabled) refreshView();
     }
   });
 
@@ -578,14 +929,18 @@ async function initialize() {
         setReviewStatus();
       }
     });
-    api.onRepositoryChanged((repo) => void useRepository(repo));
+    api.onRepositoryChanged(updateProject);
+    api.onProjectActivity(projectActivity);
+    api.onDockChanged(renderDock);
     const initial = await api.initial();
     state.codexAvailable = initial.codexAvailable;
-    $('pin').setAttribute('aria-pressed', String(initial.alwaysOnTop));
-    $('codex-status').classList.toggle('available', state.codexAvailable);
-    $('codex-status-text').textContent = state.codexAvailable ? 'Codex CLI 可用' : '未找到 Codex CLI';
-    await useRepository(initial.repository);
-    if (initial.error) status(initial.error, true);
+    if (!state.dock) renderDock(initial.dock);
+    if (!state.repoEpoch) await useRepository(initial.repository, initial.latestPath);
+    else {
+      updateControls();
+      setReviewStatus();
+    }
+    if (initial.error && !state.repo) status(initial.error, true);
   } catch (error) {
     status(describe(error), true);
     emptyDiff('无法初始化审查台', describe(error));
