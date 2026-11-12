@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>Codex 审查台</title>
+  <link rel="stylesheet" href="styles.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><span>›_</span></span>
+      <h1>Codex 审查台</h1>
+    </div>
+    <div class="toolbar-actions">
+      <button id="pin" type="button" class="button subtle" aria-pressed="false" title="保持窗口在最前面">
+        <span class="pin-icon" aria-hidden="true"></span><span>置顶</span>
+      </button>
+      <button id="review-toggle" type="button" class="button review-toggle" aria-expanded="true" aria-controls="review-panel">
+        <span class="spark" aria-hidden="true">✦</span><span>Codex 审查</span>
+      </button>
+    </div>
+  </header>
+
+  <section class="context" aria-label="仓库和审查范围">
+    <div class="repo-context">
+      <button id="repository-picker" type="button" class="button repo-picker">
+        <span class="folder-icon" aria-hidden="true"></span>
+        <span id="repository-name">选择仓库</span>
+        <span class="chevron" aria-hidden="true"></span>
+      </button>
+      <span id="branch" class="branch mono" hidden><span class="branch-icon" aria-hidden="true"></span><span id="branch-name"></span></span>
+    </div>
+    <form id="scope-form" class="scope-form">
+      <label for="scope" class="scope-label">范围</label>
+      <select id="scope" title="选择改动范围" disabled>
+        <option value="worktree">工作区</option>
+        <option value="unstaged">未暂存</option>
+        <option value="staged">已暂存</option>
+        <option value="base">对比分支</option>
+        <option value="commit">指定提交</option>
+      </select>
+      <label for="ref" class="visually-hidden">分支或提交</label>
+      <input id="ref" class="ref mono" type="text" placeholder="分支名称" autocomplete="off" spellcheck="false" hidden>
+      <button id="refresh" type="submit" class="button subtle" title="刷新改动（Ctrl+R）" disabled>
+        <span class="refresh-icon" aria-hidden="true">↻</span><span id="refresh-text">刷新</span>
+      </button>
+    </form>
+  </section>
+
+  <main id="workbench" class="workbench">
+    <aside class="files" aria-label="改动文件">
+      <div class="panel-heading">
+        <h2>改动文件</h2><span id="file-count" class="count mono">0</span>
+      </div>
+      <label class="search" for="file-filter">
+        <span class="search-icon" aria-hidden="true"></span>
+        <input id="file-filter" type="search" placeholder="筛选文件路径" autocomplete="off" spellcheck="false" disabled>
+      </label>
+      <div id="file-list" class="file-list"></div>
+    </aside>
+
+    <section class="diff" aria-labelledby="diff-title">
+      <div class="panel-heading diff-heading">
+        <h2 id="diff-title">代码差异</h2>
+        <span id="diff-totals" class="diff-totals mono" hidden></span>
+      </div>
+      <div id="diff-body" class="diff-body" tabindex="0" aria-label="代码差异"></div>
+    </section>
+
+    <aside id="review-panel" class="review-panel" aria-labelledby="review-title">
+      <div class="panel-heading review-heading">
+        <h2 id="review-title"><span class="spark" aria-hidden="true">✦</span> Codex 审查</h2>
+        <button id="review-close" type="button" class="icon-button" aria-label="收起 Codex 审查" title="收起面板">×</button>
+      </div>
+      <div id="review-body" class="review-body">
+        <p id="review-status" class="review-status" role="status">选择 Git 仓库后可开始审查。</p>
+        <div id="review-results" class="review-results" hidden></div>
+      </div>
+      <div class="review-controls">
+        <button id="review-copy" type="button" class="button subtle" hidden>复制审查结果</button>
+        <button id="review-start" type="button" class="button primary" disabled>运行 Codex 审查</button>
+        <button id="review-cancel" type="button" class="button cancel" hidden>取消审查</button>
+        <p class="usage-note">运行审查会把当前差异交给 Codex，并消耗用量。</p>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="statusbar">
+    <span id="status-message" role="status">正在初始化…</span>
+    <span id="codex-status" class="codex-status"><span class="status-light" aria-hidden="true"></span><span id="codex-status-text">Codex CLI</span></span>
+  </footer>
+</body>
+</html>

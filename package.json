@@ -1,0 +1,12 @@
+{
+  "name": "codex-review-desk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local Windows code review companion for Codex",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File Launch.ps1",
+    "test": "node --test"
+  },
+  "engines": { "node": ">=22" }
+}
