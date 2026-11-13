@@ -1,0 +1,151 @@
+#window-brand {
+  -webkit-app-region: no-drag;
+  flex: 0 1 auto;
+  min-width: 0;
+  user-select: none;
+}
+
+#window-brand .brand-mark { flex: 0 0 auto; }
+#window-brand h1 { overflow: hidden; text-overflow: ellipsis; }
+.topbar .toolbar-actions { flex: 0 0 auto; }
+
+.collapse-icon {
+  position: relative;
+  width: 12px;
+  height: 9px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+
+.collapse-icon::after {
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  width: 3px;
+  height: 3px;
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
+}
+
+body.ball-collapsed {
+  display: grid;
+  grid-template-rows: none;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+body.ball-collapsed > :not(#floating-ball) { display: none !important; }
+
+#floating-ball {
+  -webkit-app-region: no-drag;
+  position: relative;
+  display: grid;
+  width: 48px;
+  height: 48px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #c9ced5;
+  font: 600 16px/1 var(--mono);
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+  --capsule-width: 44px;
+  --capsule-height: 44px;
+  --capsule-left: 2px;
+  --capsule-top: 2px;
+  --capsule-radius: 50%;
+}
+
+#floating-ball::before {
+  position: absolute;
+  left: var(--capsule-left);
+  top: var(--capsule-top);
+  width: var(--capsule-width);
+  height: var(--capsule-height);
+  border: 1px solid #45484e;
+  border-radius: var(--capsule-radius);
+  background: #25272bf5;
+  content: '';
+}
+
+#floating-ball:hover { background: transparent; color: #f0f2f4; }
+#floating-ball:hover::before { border-color: #6b717b; background: #303338; }
+#floating-ball.dragging { cursor: grabbing; }
+#floating-ball:focus-visible { outline: none; }
+#floating-ball:focus-visible::before { outline: 2px solid var(--accent); outline-offset: -3px; }
+#floating-ball span {
+  position: absolute;
+  left: var(--capsule-left);
+  top: var(--capsule-top);
+  display: grid;
+  place-items: center;
+  width: var(--capsule-width);
+  height: var(--capsule-height);
+  pointer-events: none;
+}
+
+body[data-ball-attached="true"] #floating-ball { --capsule-width: 28px; }
+body[data-ball-attached="true"][data-ball-edge="right"] #floating-ball {
+  --capsule-left: 0px;
+  --capsule-radius: 0 12px 12px 0;
+}
+body[data-ball-attached="true"][data-ball-edge="left"] #floating-ball {
+  --capsule-left: 20px;
+  --capsule-radius: 12px 0 0 12px;
+}
+body[data-ball-attached="true"][data-ball-edge="top"] #floating-ball,
+body[data-ball-attached="true"][data-ball-edge="bottom"] #floating-ball {
+  --capsule-width: 44px;
+  --capsule-height: 28px;
+}
+body[data-ball-attached="true"][data-ball-edge="top"] #floating-ball {
+  --capsule-top: 20px;
+  --capsule-radius: 12px 12px 0 0;
+}
+body[data-ball-attached="true"][data-ball-edge="bottom"] #floating-ball {
+  --capsule-top: 0px;
+  --capsule-radius: 0 0 12px 12px;
+}
+body[data-ball-attached="true"][data-ball-edge="right"][data-ball-inside="true"] #floating-ball {
+  --capsule-left: 20px;
+  --capsule-radius: 12px 0 0 12px;
+}
+body[data-ball-attached="true"][data-ball-edge="left"][data-ball-inside="true"] #floating-ball {
+  --capsule-left: 0px;
+  --capsule-radius: 0 12px 12px 0;
+}
+body[data-ball-attached="true"][data-ball-edge="top"][data-ball-inside="true"] #floating-ball {
+  --capsule-top: 0px;
+  --capsule-radius: 0 0 12px 12px;
+}
+body[data-ball-attached="true"][data-ball-edge="bottom"][data-ball-inside="true"] #floating-ball {
+  --capsule-top: 20px;
+  --capsule-radius: 12px 12px 0 0;
+}
+
+#floating-ball.has-activity::after {
+  position: absolute;
+  left: calc(var(--capsule-left) + var(--capsule-width) - 9px);
+  top: calc(var(--capsule-top) + 6px);
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  content: '';
+  pointer-events: none;
+}
+
+body.panel-restoring:not(.ball-collapsed) > :not(#floating-ball) {
+  animation: preview-appear 120ms ease-out;
+}
+@keyframes preview-appear { from { opacity: .45; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  body.panel-restoring:not(.ball-collapsed) > :not(#floating-ball) { animation: none; }
+}

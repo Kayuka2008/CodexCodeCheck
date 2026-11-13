@@ -2,6 +2,7 @@
 
 const api = window.desk;
 const $ = (id) => document.getElementById(id);
+const sourceReader = new window.SourceReader($('diff-body'));
 const statusNames = { A: '新增', M: '修改', D: '删除', R: '重命名', C: '复制', T: '类型变更', U: '冲突', '?': '未跟踪' };
 const state = {
   repo: null,
@@ -15,6 +16,8 @@ const state = {
   dock: null,
   pendingContext: null,
   pendingActivity: null,
+  latestActivity: null,
+  filePinned: false,
   result: null,
   loading: false,
   choosing: false,
@@ -29,6 +32,13 @@ const state = {
   patchEpoch: 0,
   reviewEpoch: 0,
 };
+
+const quickOpen = new window.QuickOpen((path, line) => {
+  setExplorer('tree');
+  void revealTreePath(path);
+  void openSource(path, { line });
+  $('diff-body').focus({ preventScroll: true });
+});
 
 function element(tag, className, text) {
   const node = document.createElement(tag);
@@ -72,12 +82,37 @@ function updateControls() {
   $('refresh').disabled = !available || locked || (needsRef() && !$('ref').value.trim());
   $('refresh-text').textContent = state.loading ? '读取中…' : '刷新';
   $('changes-tab').disabled = !hasGit();
+  $('quick-open').disabled = !available || state.choosing;
   $('file-filter').disabled = !state.snapshot?.files.length;
   $('review-start').disabled = locked || !state.codexAvailable || !state.snapshot?.files.length;
   $('review-start').hidden = state.reviewing;
   $('review-cancel').hidden = !state.reviewing;
   $('review-cancel').disabled = state.cancelling;
   $('review-copy').hidden = !state.result;
+  updateFollowControls();
+}
+
+function updateFollowControls() {
+  const pin = $('pin-file');
+  const message = state.filePinned ? '恢复跟随修改' : '固定当前文件';
+  pin.title = message;
+  pin.setAttribute('aria-label', message);
+  pin.setAttribute('aria-pressed', String(state.filePinned));
+  const jump = $('latest-jump');
+  const latest = state.latestActivity;
+  jump.hidden = !latest || (!state.pendingActivity && normalizedPath(latest) === normalizedPath(state.selectedPath || ''));
+  jump.disabled = state.reviewing || state.loading || state.choosing;
+  jump.title = latest ? `跳到最新修改并继续跟随：${latest}` : '';
+}
+
+function setFilePinned(pinned) {
+  state.filePinned = pinned;
+  updateFollowControls();
+  if (pinned) status('已固定当前文件');
+  else {
+    status('已恢复跟随修改');
+    flushActivity();
+  }
 }
 
 function setReviewStatus() {
@@ -96,10 +131,12 @@ function setReviewStatus() {
 }
 
 function emptyDiff(title, message) {
+  sourceReader.clear();
   $('diff-title').textContent = '代码';
   $('diff-title').title = '';
   $('diff-totals').hidden = true;
   $('source-toggle').hidden = true;
+  $('pin-file').hidden = true;
   const wrapper = element('div', 'empty-diff');
   const content = element('div');
   content.append(element('strong', '', title));
@@ -313,6 +350,8 @@ function fileHeader(path, file) {
   else totals.hidden = true;
   $('source-toggle').hidden = !file || file.status === 'D';
   $('source-toggle').textContent = state.view === 'source' ? '差异' : '源码';
+  $('pin-file').hidden = false;
+  updateFollowControls();
 }
 
 function markSelection() {
@@ -324,12 +363,12 @@ function markSelection() {
   }
 }
 
-function selectPath(path, { source = false } = {}) {
+function selectPath(path, { source = false, locateChange = false } = {}) {
   const file = findChangedFile(path);
-  return file && (!source || file.status === 'D') ? selectFile(file) : openSource(path);
+  return file && (!source || file.status === 'D') ? selectFile(file) : openSource(path, { locateChange });
 }
 
-async function openSource(path, line) {
+async function openSource(path, { line, locateChange = false } = {}) {
   if (!state.repo) return;
   const request = ++state.patchEpoch;
   const file = findChangedFile(path);
@@ -340,14 +379,18 @@ async function openSource(path, line) {
   emptyDiff('正在读取源码…');
   fileHeader(path, file);
   try {
-    const source = await api.readFile(path);
+    const [source, patch] = await Promise.all([
+      api.readFile(path),
+      locateChange && file ? api.patch(file.id).catch(() => null) : null,
+    ]);
     if (request !== state.patchEpoch) return;
     if (source.binary || !source.text) {
       emptyDiff(source.binary ? '二进制文件' : '空文件');
       fileHeader(path, file);
       return;
     }
-    renderSource(source);
+    sourceReader.render(source, path);
+    if (!line && patch?.text) line = lastChangedLine(patch.text);
     if (line) locateLine(line);
   } catch (error) {
     if (request !== state.patchEpoch) return;
@@ -374,7 +417,7 @@ async function selectFile(file, line) {
     if (request !== state.patchEpoch) return;
     if (!patch.text) {
       if (file.status !== 'D') {
-        await openSource(file.path, line);
+        await openSource(file.path, { line });
         return;
       }
       emptyDiff('没有可显示的文本差异');
@@ -456,25 +499,30 @@ function renderPatch(patch) {
   body.scrollLeft = 0;
 }
 
-function renderSource(source) {
-  const table = element('div', 'diff-table source-table');
-  const lines = source.text.replace(/\r\n/g, '\n').split('\n');
-  if (lines.at(-1) === '') lines.pop();
-  const maxRows = 5000;
-  let cropped = source.truncated || lines.length > maxRows;
-  for (const [index, raw] of lines.slice(0, maxRows).entries()) {
-    const line = raw.length > 5000 ? `${raw.slice(0, 5000)}…` : raw;
-    cropped ||= raw.length > 5000;
-    const row = element('div', 'diff-row source-row');
-    row.dataset.line = String(index + 1);
-    row.append(element('span', 'line-number', String(index + 1)), element('span', 'line-code', line));
-    table.append(row);
+function lastChangedLine(patch) {
+  let line = 0;
+  let oldLeft = 0;
+  let newLeft = 0;
+  let changed;
+  for (const text of patch.split('\n')) {
+    const hunk = text.match(/^@@ -\d+(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/);
+    if (hunk) {
+      oldLeft = Number(hunk[1] ?? 1);
+      line = Number(hunk[2]);
+      newLeft = Number(hunk[3] ?? 1);
+    } else if (oldLeft > 0 && text.startsWith('-')) {
+      oldLeft--;
+      changed = Math.max(1, newLeft > 0 ? line : line - 1);
+    } else if (newLeft > 0 && text.startsWith('+')) {
+      newLeft--;
+      changed = line++;
+    } else if (oldLeft > 0 && newLeft > 0 && text.startsWith(' ')) {
+      oldLeft--;
+      newLeft--;
+      line++;
+    }
   }
-  const body = $('diff-body');
-  body.replaceChildren(table);
-  if (cropped) body.append(element('p', 'diff-notice', '源码过长，已截断预览。'));
-  body.scrollTop = 0;
-  body.scrollLeft = 0;
+  return changed;
 }
 
 function locateLine(line) {
@@ -514,6 +562,7 @@ async function refresh({ targetPath, activity = false } = {}) {
   if (needsRef() && !ref) return;
   const epoch = state.repoEpoch;
   clearSnapshot(activity);
+  const selection = state.patchEpoch;
   state.loading = true;
   updateControls();
   renderFiles();
@@ -545,18 +594,30 @@ async function refresh({ targetPath, activity = false } = {}) {
         renderResult();
       }
       setReviewStatus();
-      const selectedPath = targetPath || state.selectedPath;
-      const file = selectedPath && findChangedFile(selectedPath);
-      if (selectedPath && (mode === 'worktree' || file)) {
-        const source = !activity && !targetPath && mode === 'worktree' && state.view === 'source';
-        void selectPath(selectedPath, { source });
-      } else if (state.snapshot?.files.length) {
-        const first = state.snapshot.files[0];
-        if (state.explorer === 'tree') void revealTreePath(first.path);
-        void selectFile(first);
-      } else {
-        state.view = null;
-        showSnapshotPlaceholder();
+      if (selection !== state.patchEpoch && state.selectedPath) {
+        const current = findChangedFile(state.selectedPath);
+        state.selected = current?.id ?? null;
+        markSelection();
+        fileHeader(state.selectedPath, current);
+      } else if (!(activity && state.filePinned)) {
+        const selectedPath = targetPath || state.selectedPath;
+        const file = selectedPath && findChangedFile(selectedPath);
+        if (selectedPath && (mode === 'worktree' || file)) {
+          const source = mode === 'worktree' && (Boolean(targetPath) || state.view === 'source');
+          void selectPath(selectedPath, { source, locateChange: Boolean(targetPath) });
+        } else if (state.snapshot?.files.length) {
+          const first = state.snapshot.files[0];
+          if (state.explorer === 'tree' && mode === 'worktree') {
+            void revealTreePath(first.path);
+            void selectPath(first.path, { source: true, locateChange: true });
+          } else void selectFile(first);
+        } else {
+          state.view = null;
+          showSnapshotPlaceholder();
+        }
+      } else if (!state.pendingActivity) {
+        state.pendingActivity = targetPath;
+        updateFollowControls();
       }
       flushActivity();
     }
@@ -581,6 +642,7 @@ function renderRepository() {
 }
 
 async function useRepository(repo, latestPath) {
+  quickOpen.close();
   ++state.repoEpoch;
   ++state.reviewEpoch;
   state.repo = repo;
@@ -589,6 +651,8 @@ async function useRepository(repo, latestPath) {
   state.selectedPath = null;
   state.view = null;
   state.pendingActivity = null;
+  state.latestActivity = relativeActivityPath(latestPath);
+  state.filePinned = false;
   state.loading = false;
   state.reviewing = false;
   state.cancelling = false;
@@ -616,7 +680,7 @@ async function useRepository(repo, latestPath) {
 
 function updateProject(payload) {
   const context = payload && Object.hasOwn(payload, 'repository') ? payload : { repository: payload };
-  if (state.reviewing || state.choosing) {
+  if (state.reviewing || state.choosing || document.body.classList.contains('ball-collapsed')) {
     state.pendingContext = context;
     return;
   }
@@ -637,18 +701,36 @@ function projectActivity(activity) {
     return;
   }
   if (!state.repo || (activity.root && normalizedPath(activity.root) !== normalizedPath(state.repo.root))) return;
+  state.latestActivity = path;
   state.pendingActivity = path;
+  updateFollowControls();
   flushActivity();
 }
 
 function flushActivity() {
-  if (!state.repo || state.reviewing || state.loading || state.choosing || $('scope').value !== 'worktree') return;
+  if (!state.repo || state.filePinned || state.reviewing || state.loading || state.choosing || $('scope').value !== 'worktree' ||
+      $('quick-open-dialog').open ||
+      document.body.classList.contains('ball-collapsed')) return;
   const path = state.pendingActivity;
   if (!path) return;
   state.pendingActivity = null;
+  updateFollowControls();
   void revealTreePath(path, true);
   if (hasGit()) void refresh({ targetPath: path, activity: true });
   else void openSource(path);
+}
+
+function jumpToLatest() {
+  if ($('latest-jump').disabled || !state.latestActivity) return;
+  state.filePinned = false;
+  state.pendingActivity = state.latestActivity;
+  if ($('scope').value !== 'worktree') {
+    $('scope').value = 'worktree';
+    scopeChanged();
+  } else {
+    updateFollowControls();
+    flushActivity();
+  }
 }
 
 async function chooseRepository() {
@@ -683,7 +765,7 @@ function scopeChanged() {
   showSnapshotPlaceholder();
   setReviewStatus();
   if (!needsRef()) {
-    if ($('scope').value === 'worktree' && state.pendingActivity) flushActivity();
+    if ($('scope').value === 'worktree' && state.pendingActivity && !state.filePinned) flushActivity();
     else void refresh();
   } else {
     status('输入分支或提交引用');
@@ -821,6 +903,18 @@ async function cancelReview() {
 function renderDock(dock) {
   if (!dock) return;
   state.dock = dock;
+  Object.assign(document.body.dataset, {
+    dockAttached: String(Boolean(dock.attached)),
+    dockEdge: dock.edge || '',
+    dockInside: String(Boolean(dock.inside)),
+    ballAttached: String(Boolean(dock.ballAttached)),
+    ballEdge: dock.ballEdge || dock.edge || 'right',
+    ballInside: String(Boolean(dock.ballInside)),
+  });
+  window.dispatchEvent(new CustomEvent('desk-dock-state', { detail: dock }));
+  const clipped = Number.isFinite(dock.clippedWidth) ? Math.max(0, Math.min(72, dock.clippedWidth)) : 0;
+  document.body.style.setProperty('--clipped-left', `${dock.clippedEdge === 'left' ? clipped : 0}px`);
+  document.body.style.setProperty('--clipped-right', `${dock.clippedEdge === 'right' ? clipped : 0}px`);
   const button = $('dock');
   const paused = dock.following === false && dock.enabled;
   button.setAttribute('aria-pressed', String(dock.enabled && !paused));
@@ -878,11 +972,17 @@ async function initialize() {
     const row = event.target.closest('.tree-row');
     if (!row) return;
     if (row.dataset.type === 'directory') toggleDirectory(row.dataset.path);
-    else void selectPath(row.dataset.path);
+    else void selectPath(row.dataset.path, { source: true });
   });
   $('tree-list').addEventListener('keydown', treeKeydown);
   $('source-toggle').addEventListener('click', () => {
     if (state.selectedPath) void selectPath(state.selectedPath, { source: state.view === 'diff' });
+  });
+  $('pin-file').addEventListener('click', () => setFilePinned(!state.filePinned));
+  $('latest-jump').addEventListener('click', jumpToLatest);
+  $('quick-open-dialog').addEventListener('close', () => {
+    const dialog = $('quick-open-dialog');
+    if (!dialog.open && dialog.returnValue !== 'selected') flushActivity();
   });
   $('scope').addEventListener('change', scopeChanged);
   $('ref').addEventListener('input', () => {
@@ -932,6 +1032,16 @@ async function initialize() {
     api.onRepositoryChanged(updateProject);
     api.onProjectActivity(projectActivity);
     api.onDockChanged(renderDock);
+    api.onCollapsedChanged?.(({ collapsed }) => {
+      if (collapsed) {
+        quickOpen.close();
+        return;
+      }
+      requestAnimationFrame(() => {
+        if (state.pendingContext) updateProject(state.pendingContext);
+        else flushActivity();
+      });
+    });
     const initial = await api.initial();
     state.codexAvailable = initial.codexAvailable;
     if (!state.dock) renderDock(initial.dock);

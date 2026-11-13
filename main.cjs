@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, nativeTheme, screen } = require('electron');
+const { app, BrowserWindow, clipboard, dialog, globalShortcut, ipcMain, Menu, nativeTheme, screen } = require('electron');
 const { execFile } = require('node:child_process');
 const { mkdirSync, renameSync, writeFileSync } = require('node:fs');
 const fs = require('node:fs/promises');
@@ -8,10 +8,12 @@ const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { getRepository, getSnapshot, getPatch } = require('./lib/git.cjs');
 const { startReview } = require('./lib/review.cjs');
-const { listProjectDirectory, readProjectFile, trackProjectFiles } = require('./lib/project-files.cjs');
+const { listProjectDirectory, readProjectFile, trackProjectFiles, indexSearchFiles, searchProjectFiles } = require('./lib/project-files.cjs');
 const { readCodexProject } = require('./lib/codex-context.cjs');
 const { trackCodexWindow } = require('./lib/windows-dock.cjs');
-const { findDockAnchor, placeDock } = require('./lib/dock-geometry.cjs');
+const { findDockAnchor } = require('./lib/dock-geometry.cjs');
+const { placePanel, placeTab, findTabAnchor, clampWindow, tabSize } = require('./lib/companion-layout.cjs');
+const { startupEnabled, setStartupEnabled, powershell } = require('./lib/codex-startup.cjs');
 
 app.setName('Codex Review Desk');
 nativeTheme.themeSource = 'dark';
@@ -20,19 +22,12 @@ if (process.platform === 'win32') app.setAppUserModelId('CodexReviewDesk.Windows
 const page = path.join(__dirname, 'ui', 'index.html');
 const pageUrl = pathToFileURL(page).href;
 const modes = new Set(['worktree', 'unstaged', 'staged', 'base', 'commit']);
-const defaultDockAnchors = [
-  { edge: 'right', inside: false, offset: 0 },
-  { edge: 'left', inside: false, offset: 0 },
-  { edge: 'right', inside: true, offset: 42 },
-  { edge: 'left', inside: true, offset: 42 },
-  { edge: 'bottom', inside: true, offset: 0 },
-  { edge: 'top', inside: true, offset: 0 },
-  { edge: 'bottom', inside: false, offset: 0 },
-  { edge: 'top', inside: false, offset: 0 },
-];
 const maxReviewBytes = 128 * 1024;
 const maxReviewFiles = 80;
-const executable = process.env.CODEX_REVIEW_CLI || 'codex.exe';
+const ballSize = tabSize;
+const panelMinimumSize = [360, 300];
+const peekShortcut = 'Control+Shift+Space';
+let executable = process.env.CODEX_REVIEW_CLI || 'codex.exe';
 const startPath = process.env.CODEX_REVIEW_REPOSITORY || '';
 let win;
 let repository = null;
@@ -52,9 +47,26 @@ let dockPositioned = false;
 let dockAttached = false;
 let dockAnchor = null;
 let dockSize = null;
+let autoSize = true;
+let dockMode = 'attached';
+let changingSettings = false;
 let placedAnchor = null;
+let clippedEdge = null;
+let clippedWidth = 0;
 let dockAdjustment = null;
 let windowReady = false;
+let collapsed = false;
+let expandedBounds = null;
+let collapseBallOrigin = null;
+let ballPlacement = null;
+let ballDrag = null;
+let ballEdge = 'right';
+let ballInside = false;
+let hostSeen = false;
+let hostProbeReady = false;
+let applyingBounds = false;
+let shortcutAvailable = false;
+let projectSearchIndex = null;
 let lastDockState;
 let activeContext = null;
 let contextMisses = 0;
@@ -75,12 +87,14 @@ function setProject(selected) {
   stopFiles?.();
   stopFiles = undefined;
   repository = selected;
+  projectSearchIndex = null;
   latestPath = null;
   currentSnapshot = null;
   snapshotVersion++;
   if (selected) {
     stopFiles = trackProjectFiles(selected, relative => {
       latestPath = relative;
+      projectSearchIndex = null;
       send('desk:project-activity', { path: relative, root: selected.root });
     });
   }
@@ -96,25 +110,39 @@ function dockLayoutPath() {
 
 async function restoreDockLayout() {
   try {
-    const { anchor, width, height } = JSON.parse(await fs.readFile(dockLayoutPath(), 'utf8'));
+    const { anchor, width, height, autoSize: savedAutoSize, ball, mode } = JSON.parse(await fs.readFile(dockLayoutPath(), 'utf8'));
+    autoSize = savedAutoSize === true;
+    dockMode = mode === 'free' ? 'free' : 'attached';
+    if (ball && ['left', 'right', 'top', 'bottom'].includes(ball.edge) && Number.isSafeInteger(ball.offset)) {
+      ballPlacement = { edge: ball.edge, offset: Math.max(12, Math.min(16384, ball.offset)) };
+    } else if (ball && [ball.x, ball.y].every(value => Number.isSafeInteger(value) && Math.abs(value) <= 100000)) {
+      // Migrate old relative XY coordinates into a real edge anchor.
+      ballPlacement = ball.relative
+        ? { edge: anchor?.edge ?? 'right', offset: ['top', 'bottom'].includes(anchor?.edge) ? ball.x : ball.y }
+        : { x: ball.x, y: ball.y };
+    }
     if (!['left', 'right', 'top', 'bottom'].includes(anchor?.edge) || typeof anchor.inside !== 'boolean' ||
         !Number.isSafeInteger(anchor.offset) || Math.abs(anchor.offset) > 16384 ||
         !Number.isSafeInteger(width) || width < 360 || width > 16384 ||
         !Number.isSafeInteger(height) || height < 300 || height > 16384) return;
     dockAnchor = { edge: anchor.edge, inside: anchor.inside, offset: anchor.offset };
-    if (anchor.edge === 'left' && !anchor.inside && anchor.allowOverhang === true) dockAnchor.allowOverhang = true;
+    if (['left', 'right'].includes(anchor.edge) && !anchor.inside && anchor.allowOverhang === true) dockAnchor.allowOverhang = true;
     dockSize = { width, height };
   } catch { /* Use the default placement if a saved layout is unavailable. */ }
 }
 
+function saveDockLayout() {
+  const file = dockLayoutPath();
+  const { width, height } = dockSize ?? expandedBounds ?? win.getBounds();
+  mkdirSync(path.dirname(file), { recursive: true });
+  writeFileSync(`${file}.tmp`, JSON.stringify({ version: 2, anchor: dockAnchor, width, height, autoSize, mode: dockMode, ball: ballPlacement }), 'utf8');
+  renameSync(`${file}.tmp`, file);
+}
+
 function rememberDockLayout({ width, height }) {
   dockSize = { width, height };
-  if (!dockAnchor) return;
-  const file = dockLayoutPath();
   try {
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(`${file}.tmp`, JSON.stringify({ anchor: dockAnchor, width, height }), 'utf8');
-    renameSync(`${file}.tmp`, file);
+    saveDockLayout();
   } catch { /* Keep using the layout for this session if it cannot be saved. */ }
 }
 
@@ -133,12 +161,25 @@ async function selectManualProject(input) {
   return selected;
 }
 
-function checkCli() {
+function probeCli(command) {
   return new Promise(resolve => {
-    execFile(executable, ['--version'], { timeout: 3500, windowsHide: true }, (error, stdout) => {
+    execFile(command, ['--version'], { timeout: 3500, windowsHide: true }, (error, stdout) => {
       resolve(!error && /^codex-cli\b/m.test(stdout));
     });
   });
+}
+
+async function checkCli() {
+  if (await probeCli(executable)) return true;
+  if (process.env.CODEX_REVIEW_CLI || process.platform !== 'win32') return false;
+  const bundled = await new Promise(resolve => {
+    const command = '$p = Get-AppxPackage -Name OpenAI.Codex | Select-Object -First 1; if ($p) { [Console]::OutputEncoding = [Text.Encoding]::UTF8; Join-Path $p.InstallLocation "app\\resources\\codex.exe" }';
+    execFile(powershell, ['-NoProfile', '-NonInteractive', '-Command', command],
+      { timeout: 7000, windowsHide: true }, (error, stdout) => resolve(error ? '' : stdout.trim()));
+  });
+  if (!bundled || !await probeCli(bundled)) return false;
+  executable = bundled;
+  return true;
 }
 
 function send(channel, value) {
@@ -146,12 +187,19 @@ function send(channel, value) {
 }
 
 function dockState() {
-  const attached = dockEnabled && Boolean(codexWindow) && dockAttached;
+  const attached = dockEnabled && Boolean(codexWindow) && dockMode === 'attached' && dockAttached;
   let status = '独立窗口';
   if (dockEnabled) status = codexWindow ? '等待贴边' : '等待 Codex 窗口';
-  if (attached) status = `已吸附 · ${placedAnchor.inside ? '内侧' : '外侧'}`;
+  if (attached) {
+    const edge = { left: '左', right: '右', top: '上', bottom: '下' }[collapsed ? ballEdge : placedAnchor?.edge];
+    status = `已贴合 · ${edge}${(collapsed ? ballInside : placedAnchor?.inside) ? '内侧' : '外侧'}`;
+  }
+  if (dockEnabled && dockMode === 'free') status = '已脱离 · 拖回边缘可吸附';
   if (attached) status += activeContext ? ' · 跟随项目' : following ? ' · 等待项目' : ' · 手动项目';
-  return { enabled: dockEnabled, attached, following, status };
+  return { enabled: dockEnabled, attached, following, status, collapsed,
+    edge: placedAnchor?.edge ?? dockAnchor?.edge ?? 'right', inside: placedAnchor?.inside ?? false,
+    ballAttached: attached && collapsed, ballEdge, ballInside,
+    clippedEdge: attached ? clippedEdge : null, clippedWidth: attached ? clippedWidth : 0 };
 }
 
 function publishDock() {
@@ -185,37 +233,183 @@ function defaultDockSize(current, target, workAreas) {
   return { ...current, width, height };
 }
 
+function floatingBallBounds(panel, target, workAreas, anchor) {
+  if (target && dockMode === 'attached') {
+    const preferred = ballPlacement?.edge ? ballPlacement : { edge: anchor?.edge ?? 'right', offset: 72 };
+    const placed = placeTab(target, workAreas, preferred);
+    ballEdge = placed.edge;
+    ballInside = placed.inside;
+    return placed.bounds;
+  }
+  const origin = ballPlacement && Number.isFinite(ballPlacement.x) ? ballPlacement
+    : { x: panel.x + panel.width - ballSize, y: panel.y };
+  return clampBall({ ...origin, width: ballSize, height: ballSize });
+}
+
+function clampBall(bounds) {
+  const area = screen.getDisplayMatching(bounds).workArea;
+  return clampWindow(bounds, area);
+}
+
+function applyBounds(bounds) {
+  const current = win.getBounds();
+  if (['x', 'y', 'width', 'height'].every(key => current[key] === bounds[key])) return;
+  applyingBounds = true;
+  try { win.setBounds(bounds); }
+  finally { applyingBounds = false; }
+}
+
+function syncWindowLayer() {
+  if (!windowReady || !win || win.isDestroyed()) return;
+  const onTop = dockEnabled && codexWindow?.visible !== false && Boolean(codexWindow) &&
+    (codexWindow.foreground || win.isFocused() || choosing);
+  if (win.isAlwaysOnTop() !== onTop) win.setAlwaysOnTop(onTop);
+}
+
 function updateDockPosition() {
-  if (!windowReady || !win || win.isDestroyed() || dockAdjustment) return;
-  if (!dockEnabled || !codexWindow) {
+  if (!windowReady || !win || win.isDestroyed()) return;
+  if (dockEnabled && !hostProbeReady) return;
+  syncWindowLayer();
+  if (dockAdjustment || ballDrag) return;
+  if (codexWindow) hostSeen = true;
+  // Hide the companion as a group when the host minimizes or another app wins focus.
+  // Do not steal focus or leave a separate topmost panel over unrelated applications.
+  if (dockEnabled && hostSeen && (!codexWindow || codexWindow.visible === false ||
+      (!codexWindow.foreground && !win.isFocused() && !choosing))) {
+    if (win.isVisible()) win.hide();
+    publishDock();
+    return;
+  }
+  if (!dockEnabled || !codexWindow || dockMode === 'free') {
     dockAttached = false;
-    if (dockEnabled && dockPositioned && !win.isFocused() && !choosing) win.hide();
+    if (collapsed) applyBounds(floatingBallBounds(expandedBounds ?? win.getBounds()));
+    if (!win.isVisible()) win.showInactive();
     publishDock();
     return;
   }
 
   const { target, workAreas } = dockTarget();
   const current = win.getBounds();
-  const panel = dockSize ? { ...current, ...dockSize } : dockPositioned ? current : defaultDockSize(current, target, workAreas);
-  const anchors = dockAnchor
-    ? [dockAnchor, { ...dockAnchor, inside: !dockAnchor.inside }, ...defaultDockAnchors]
-    : defaultDockAnchors;
-  let bounds;
-  for (const anchor of anchors) {
-    bounds = placeDock(panel, target, workAreas, anchor);
-    if (!bounds) continue;
-    placedAnchor = anchor;
-    dockAnchor ??= anchor;
-    break;
+  const fullWindow = collapsed ? expandedBounds : current;
+  const panel = dockSize ? { ...fullWindow, ...dockSize } : dockPositioned ? fullWindow : defaultDockSize(fullWindow, target, workAreas);
+  const placement = placePanel(panel, target, workAreas, dockAnchor, autoSize);
+  const bounds = placement?.bounds;
+  if (placement) {
+    placedAnchor = placement.anchor;
+    dockAnchor ??= { edge: 'right', inside: false, offset: 0 };
   }
-
-  dockAttached = Boolean(bounds);
+  dockAttached = collapsed || Boolean(bounds);
+  clippedEdge = null;
+  clippedWidth = 0;
   if (bounds) {
     dockPositioned = true;
-    if (Object.keys(bounds).some(key => current[key] !== bounds[key])) win.setBounds(bounds);
+    if (placedAnchor.allowOverhang && !placedAnchor.inside && ['left', 'right'].includes(placedAnchor.edge)) {
+      const area = screen.getDisplayMatching(bounds).workArea;
+      clippedEdge = placedAnchor.edge;
+      clippedWidth = Math.max(0, clippedEdge === 'left' ? area.x - bounds.x : bounds.x + bounds.width - area.x - area.width);
+    }
   }
+  const visibleBounds = collapsed ? floatingBallBounds(bounds ?? panel, target, workAreas, bounds ? placedAnchor : dockAnchor) : bounds;
+  if (collapsed && bounds) expandedBounds = bounds;
+  if (visibleBounds) applyBounds(visibleBounds);
+  if (collapsed && visibleBounds) collapseBallOrigin = { x: visibleBounds.x, y: visibleBounds.y };
   if (!win.isVisible()) win.showInactive();
   publishDock();
+}
+
+function setCollapsed(value) {
+  if (typeof value !== 'boolean') throw new Error('无效的悬浮球状态。');
+  if (value === collapsed) return { collapsed };
+  if (choosing) return { collapsed };
+  dockAdjustment = null;
+  ballDrag = null;
+  if (value) {
+    expandedBounds = win.getBounds();
+    collapsed = true;
+    win.setMinimumSize(ballSize, ballSize);
+    win.setResizable(false);
+    win.setMovable(false);
+  } else {
+    const ballBounds = win.getBounds();
+    collapsed = false;
+    win.setResizable(true);
+    win.setMovable(true);
+    win.setMinimumSize(...panelMinimumSize);
+    const panel = { ...expandedBounds, ...(dockSize ?? {}) };
+    const origin = collapseBallOrigin ?? ballBounds;
+    const restored = dockMode === 'free'
+      ? clampWindow({ ...panel, x: panel.x + ballBounds.x - origin.x, y: panel.y + ballBounds.y - origin.y },
+        screen.getDisplayMatching(ballBounds).workArea)
+      : panel;
+    applyBounds(restored);
+    expandedBounds = null;
+  }
+  send('desk:collapsed-changed', { collapsed });
+  updateDockPosition();
+  if (value) {
+    const { x, y } = win.getBounds();
+    collapseBallOrigin = { x, y };
+  }
+  return { collapsed };
+}
+
+function dragBall(phase) {
+  if (!collapsed) return;
+  if (phase === 'start') {
+    ballDrag = { bounds: win.getBounds(), cursor: screen.getCursorScreenPoint(), moved: false,
+      attached: dockEnabled && dockMode === 'attached' && Boolean(codexWindow), edge: ballEdge, detached: false };
+    return;
+  }
+  const drag = ballDrag;
+  if (!drag || (phase !== 'move' && phase !== 'end')) return;
+  if (phase === 'move') {
+    drag.moved = true;
+    const cursor = screen.getCursorScreenPoint();
+    const x = cursor.x - drag.cursor.x;
+    const y = cursor.y - drag.cursor.y;
+    const candidate = clampBall({ ...drag.bounds, x: drag.bounds.x + x, y: drag.bounds.y + y });
+    const targetInfo = dockEnabled && codexWindow?.visible !== false && codexWindow ? dockTarget() : null;
+    const vertical = ['left', 'right'].includes(drag.edge);
+    if (drag.attached && !drag.detached && targetInfo && Math.abs(vertical ? x : y) <= 60) {
+      ballPlacement = { edge: drag.edge, offset: candidate[vertical ? 'y' : 'x'] - targetInfo.target[vertical ? 'y' : 'x'] };
+      applyBounds(floatingBallBounds(expandedBounds, targetInfo.target, targetInfo.workAreas, dockAnchor));
+    } else {
+      drag.detached = true;
+      dockMode = 'free';
+      dockAttached = false;
+      applyBounds(candidate);
+    }
+    publishDock();
+  }
+  if (phase === 'end') {
+    ballDrag = null;
+    if (!drag.moved) return;
+    const bounds = win.getBounds();
+    const targetInfo = dockEnabled && codexWindow ? dockTarget() : null;
+    const anchor = targetInfo ? findTabAnchor(bounds, targetInfo.target, targetInfo.workAreas) : null;
+    if (anchor) {
+      ballPlacement = anchor;
+      dockMode = 'attached';
+      if (dockAnchor?.edge !== anchor.edge) dockAnchor = { edge: anchor.edge, inside: false, offset: 0 };
+    } else {
+      ballPlacement = { x: bounds.x, y: bounds.y };
+      dockMode = 'free';
+    }
+    try { saveDockLayout(); } catch { /* Keep the new position in memory. */ }
+    updateDockPosition();
+  }
+}
+
+async function searchFiles(query) {
+  if (typeof query !== 'string' || query.length > 320) throw new Error('文件名过长。');
+  const project = repository;
+  if (!project) return { entries: [], truncated: false };
+  if (!projectSearchIndex || projectSearchIndex.root !== project.root || Date.now() >= projectSearchIndex.expires) {
+    projectSearchIndex = { root: project.root, expires: Date.now() + 12000, result: indexSearchFiles(project) };
+  }
+  const index = await projectSearchIndex.result;
+  if (repository?.root !== project.root) return { entries: [], truncated: false };
+  return searchProjectFiles(project, index, query);
 }
 
 function finishDockAdjustment(kind) {
@@ -234,14 +428,24 @@ function finishDockAdjustment(kind) {
     if (kind === 'move') {
       const anchor = findDockAnchor(panel, target, workAreas);
       if (anchor) {
-        if (anchor.edge === 'left' && !anchor.inside && dockAnchor?.allowOverhang) anchor.allowOverhang = true;
+        if (['left', 'right'].includes(anchor.edge) && !anchor.inside && dockAnchor?.allowOverhang) anchor.allowOverhang = true;
         dockAnchor = anchor;
+        dockMode = 'attached';
+        rememberDockLayout(autoSize && dockSize ? dockSize : panel);
+      } else {
+        dockMode = 'free';
         rememberDockLayout(panel);
       }
-    } else if (placedAnchor) {
+    } else if (placedAnchor && dockMode === 'attached') {
       const verticalEdge = placedAnchor.edge === 'left' || placedAnchor.edge === 'right';
       const offset = verticalEdge ? panel.y - target.y : panel.x - target.x;
-      dockAnchor = { ...placedAnchor, offset };
+      // Resizing an inside fallback must not turn it into the saved preference.
+      dockAnchor = { ...dockAnchor, offset: autoSize ? 0 : offset };
+      const size = autoSize && dockSize
+        ? verticalEdge ? { width: panel.width, height: dockSize.height } : { width: dockSize.width, height: panel.height }
+        : panel;
+      rememberDockLayout(size);
+    } else {
       rememberDockLayout(panel);
     }
     updateDockPosition();
@@ -281,22 +485,80 @@ function setDocked(enabled) {
   dockEnabled = enabled;
   following = enabled;
   if (enabled) {
+    dockMode = 'attached';
     if (reattach && codexWindow) {
       const { target, workAreas } = dockTarget();
-      const panel = win.getBounds();
+      const panel = collapsed ? expandedBounds : win.getBounds();
       dockAnchor = findDockAnchor(panel, target, workAreas) ?? dockAnchor;
       dockSize = { width: panel.width, height: panel.height };
     }
     updateDockPosition();
-    if (reattach && dockAttached) rememberDockLayout(win.getBounds());
+    if (reattach && dockAttached) rememberDockLayout(dockSize ?? win.getBounds());
     void syncProject();
   } else {
     activeContext = null;
     dockAttached = false;
     dockAdjustment = null;
+    if (collapsed) {
+      const { x, y } = win.getBounds();
+      ballPlacement = { x, y };
+    }
+    syncWindowLayer();
     if (!win.isVisible()) win.showInactive();
   }
   return publishDock();
+}
+
+async function readSettings() {
+  return { autoSize, launchWithCodex: await startupEnabled(), shortcutAvailable };
+}
+
+async function changeSettings(key, value) {
+  if (typeof value !== 'boolean' || !['autoSize', 'launchWithCodex'].includes(key)) throw new Error('设置无效。');
+  if (changingSettings) throw new Error('正在保存设置，请稍候。');
+  changingSettings = true;
+  try {
+    if (key === 'launchWithCodex') {
+      try { await setStartupEnabled(value, process.execPath, app.isPackaged ? undefined : __dirname, codexWindow?.processId); }
+      catch { throw new Error('无法更新随 Codex 启动的设置，请重试。'); }
+    } else {
+      const before = autoSize;
+      autoSize = value;
+      dockSize ??= expandedBounds ?? win.getBounds();
+      try { saveDockLayout(); }
+      catch { autoSize = before; throw new Error('无法保存窗口大小设置。'); }
+      updateDockPosition();
+    }
+    return await readSettings();
+  } finally {
+    changingSettings = false;
+  }
+}
+
+function setOutsideEdge(edge, inside = false) {
+  if (!['left', 'right', 'top'].includes(edge) || typeof inside !== 'boolean') throw new Error('无效的吸附位置。');
+  const offset = autoSize ? 0 : dockAnchor?.edge === edge ? dockAnchor.offset : 0;
+  const anchor = { edge, inside, offset };
+  dockEnabled = true;
+  dockMode = 'attached';
+  dockAnchor = anchor;
+  ballPlacement = { edge, offset: ballPlacement?.offset ?? 72 };
+  rememberDockLayout(dockSize ?? expandedBounds ?? win.getBounds());
+  updateDockPosition();
+  return publishDock();
+}
+
+function togglePeek() {
+  if (!windowReady || !win || win.isDestroyed() || choosing) return;
+  if (dockEnabled && codexWindow?.visible === false) return;
+  if (collapsed || !win.isVisible() || win.isMinimized()) {
+    if (collapsed) setCollapsed(false);
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+  } else {
+    setCollapsed(true);
+  }
 }
 
 async function collectReviewInput(root, snapshot, signal) {
@@ -330,13 +592,15 @@ function createWindow(codexAvailable) {
     title: 'Codex Review Desk',
     width: dockSize?.width ?? 540,
     height: dockSize?.height ?? 700,
-    minWidth: 360,
-    minHeight: 300,
+    minWidth: panelMinimumSize[0],
+    minHeight: panelMinimumSize[1],
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
     hasShadow: false,
+    skipTaskbar: true,
     resizable: true,
+    maximizable: false,
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
@@ -362,7 +626,7 @@ function createWindow(codexAvailable) {
     });
   }
 
-  handle('initial', () => ({ repository, latestPath, dock: dockState(), codexAvailable, error: initialError }));
+  handle('initial', () => ({ repository, latestPath, dock: dockState(), collapsed, codexAvailable, error: initialError }));
   handle('choose-repository', async () => {
     if (activeReview || choosing) return null;
     choosing = true;
@@ -407,7 +671,13 @@ function createWindow(codexAvailable) {
     if (!repository) throw new Error('请先打开项目。');
     return readProjectFile(repository, relative);
   });
+  handle('search-files', searchFiles);
   handle('dock', setDocked);
+  handle('collapse', setCollapsed);
+  handle('drag-ball', dragBall);
+  handle('settings', readSettings);
+  handle('set-setting', changeSettings);
+  handle('outside-edge', setOutsideEdge);
   handle('close', () => { setImmediate(() => win.close()); });
   handle('start-review', async () => {
     if (!codexAvailable) throw new Error('未找到可用的 Codex CLI。请检查安装后重新启动审查台。');
@@ -449,14 +719,22 @@ function createWindow(codexAvailable) {
   win.once('ready-to-show', () => {
     windowReady = true;
     updateDockPosition();
-    if (!win.isVisible()) win.showInactive();
   });
   win.on('focus', updateDockPosition);
-  win.on('blur', () => setTimeout(updateDockPosition, 250));
-  win.on('will-move', () => { if (dockEnabled) dockAdjustment = 'move'; });
+  win.on('blur', () => {
+    dragBall('end');
+    setTimeout(updateDockPosition, 60);
+  });
+  win.on('will-move', () => { if (dockEnabled && !collapsed && !applyingBounds) dockAdjustment = 'move'; });
   win.on('moved', () => finishDockAdjustment('move'));
-  win.on('will-resize', () => { if (dockEnabled) dockAdjustment = 'resize'; });
+  win.on('will-resize', () => { if (dockEnabled && !collapsed && !applyingBounds) dockAdjustment = 'resize'; });
   win.on('resized', () => finishDockAdjustment('resize'));
+  if (process.platform === 'win32') {
+    win.hookWindowMessage(0x00a3, hit => {
+      // WM_NCLBUTTONDBLCLK with HTCAPTION, delivered for the native drag area.
+      if (hit.readInt32LE() === 2) setImmediate(() => { if (!win.isDestroyed()) setCollapsed(true); });
+    });
+  }
   win.loadFile(page).catch(error => {
     dialog.showErrorBox('Codex Review Desk', error.message);
     app.quit();
@@ -478,7 +756,9 @@ async function start() {
     } catch { /* First run or settings unavailable. */ }
   }
   createWindow(await checkCli());
+  shortcutAvailable = globalShortcut.register(peekShortcut, togglePeek);
   stopWindows = trackCodexWindow(value => {
+    hostProbeReady = true;
     const becameForeground = value?.foreground && (!codexWindow?.foreground || value.handle !== codexWindow.handle);
     codexWindow = value;
     updateDockPosition();
@@ -491,14 +771,16 @@ async function start() {
   contextTimer = setInterval(() => void syncProject(), 1500);
 }
 
-if (!app.requestSingleInstanceLock({ repository: startPath })) {
+if (!app.requestSingleInstanceLock({ repository: startPath, fromCodexStartup: process.argv.includes('--codex-startup') })) {
   app.quit();
 } else {
   const ready = app.whenReady().then(start);
   ready.catch(error => { dialog.showErrorBox('Codex Review Desk', error.message); app.quit(); });
   app.on('second-instance', (_, __, ___, data) => {
+    if (data?.fromCodexStartup) return;
     ready.then(async () => {
       if (!win || win.isDestroyed()) return;
+      if (collapsed) setCollapsed(false);
       if (win.isMinimized()) win.restore();
       if (!win.isVisible()) win.show();
       win.focus();
@@ -512,6 +794,7 @@ if (!app.requestSingleInstanceLock({ repository: startPath })) {
     }).catch(() => {});
   });
   app.on('before-quit', () => {
+    globalShortcut.unregisterAll();
     activeReview?.cancel();
     stopFiles?.();
     stopWindows?.();

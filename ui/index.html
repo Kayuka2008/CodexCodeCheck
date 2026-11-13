@@ -6,21 +6,30 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'none'">
   <title>Codex 审查台</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="source-reader.css">
+  <link rel="stylesheet" href="ball.css">
+  <link rel="stylesheet" href="quick-open.css">
+  <script src="source-reader.js" defer></script>
+  <script src="quick-open.js" defer></script>
   <script src="app.js" defer></script>
+  <script src="settings.js" defer></script>
+  <script src="ball.js" defer></script>
 </head>
 <body>
   <header class="topbar drag-region">
-    <div class="brand">
+    <div class="brand" id="window-brand" title="双击收起为贴边把手">
       <span class="brand-mark" aria-hidden="true"><span>›_</span></span>
-      <h1>Codex 审查台</h1>
+      <h1>代码预览</h1>
     </div>
     <div class="toolbar-actions">
       <button id="dock" type="button" class="button subtle" aria-pressed="false" title="吸附到 Codex 窗口">
         <span class="pin-icon" aria-hidden="true"></span><span id="dock-label">吸附</span>
       </button>
-      <button id="review-toggle" type="button" class="button review-toggle" aria-expanded="false" aria-controls="review-panel">
+      <button id="review-toggle" type="button" class="button review-toggle" aria-label="显示或收起 Codex 审查" title="Codex 审查" aria-expanded="false" aria-controls="review-panel">
         <span class="spark" aria-hidden="true">✦</span><span>审查</span>
       </button>
+      <button id="settings-open" type="button" class="icon-button settings-button" aria-haspopup="dialog" aria-controls="settings-dialog" aria-label="设置" title="设置">⚙</button>
+      <button id="window-collapse" type="button" class="icon-button" aria-label="收起代码预览" title="收起（Ctrl+Shift+空格）"><span class="collapse-icon" aria-hidden="true"></span></button>
       <button id="window-close" type="button" class="icon-button" aria-label="关闭窗口" title="关闭窗口">×</button>
     </div>
   </header>
@@ -57,6 +66,7 @@
         <div class="explorer-tabs" role="group" aria-label="文件视图">
           <button id="tree-tab" class="explorer-tab" type="button" aria-pressed="true" aria-controls="tree-list">文件</button>
           <button id="changes-tab" class="explorer-tab" type="button" aria-pressed="false" aria-controls="file-list">改动 <span id="file-count" class="count mono">0</span></button>
+          <button id="quick-open" class="explorer-tab quick-open-button" type="button" aria-label="快速打开文件" title="快速打开文件（Ctrl+P）" aria-haspopup="dialog" aria-controls="quick-open-dialog" disabled><span class="search-icon" aria-hidden="true"></span></button>
         </div>
       </div>
       <label id="file-search" class="search" for="file-filter" hidden>
@@ -71,6 +81,7 @@
       <div class="panel-heading diff-heading">
         <h2 id="diff-title">代码差异</h2>
         <span id="diff-totals" class="diff-totals mono" hidden></span>
+        <button id="pin-file" type="button" class="button subtle pin-file-button" aria-label="固定当前文件" aria-pressed="false" title="固定当前文件" hidden><span class="pin-icon" aria-hidden="true"></span></button>
         <button id="source-toggle" type="button" class="button subtle source-toggle" hidden>源码</button>
       </div>
       <div id="diff-body" class="diff-body" tabindex="0" aria-label="代码预览"></div>
@@ -96,7 +107,44 @@
 
   <footer class="statusbar">
     <span id="status-message" role="status">正在初始化…</span>
+    <button id="latest-jump" type="button" class="latest-jump" hidden>跳到最新</button>
     <span id="dock-status" class="codex-status dock-status"><span class="status-light" aria-hidden="true"></span><span id="dock-status-text">连接中…</span></span>
   </footer>
+  <dialog id="quick-open-dialog" class="quick-open-dialog" aria-label="快速打开文件">
+    <div class="quick-open-heading">
+      <input id="quick-open-query" type="search" role="combobox" aria-label="搜索项目文件" aria-controls="quick-open-results" aria-expanded="false" aria-autocomplete="list" placeholder="搜索文件，可附 :行号" maxlength="320" autocomplete="off" spellcheck="false">
+      <button id="quick-open-close" type="button" class="icon-button" aria-label="关闭快速打开" title="关闭（Esc）">×</button>
+    </div>
+    <div id="quick-open-results" class="quick-open-results" role="listbox" aria-label="匹配文件"></div>
+    <p id="quick-open-status" class="quick-open-status" role="status"></p>
+  </dialog>
+  <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title">
+    <div class="settings-heading">
+      <h2 id="settings-title">设置</h2>
+      <button id="settings-close" type="button" class="icon-button" aria-label="关闭设置" title="关闭设置">×</button>
+    </div>
+    <label class="settings-row">
+      <span><strong>随 Codex 启动</strong><small>打开 Codex 桌面窗口时启动审查台</small></span>
+      <input id="setting-launch" class="setting-switch" type="checkbox" role="switch" disabled>
+    </label>
+    <label class="settings-row">
+      <span><strong>自动调整大小</strong><small>吸附后随 Codex 的窗口尺寸调整</small></span>
+      <input id="setting-auto-size" class="setting-switch" type="checkbox" role="switch" disabled>
+    </label>
+    <div class="settings-row">
+      <strong>吸附位置</strong>
+      <div class="settings-edges">
+        <button type="button" class="button subtle" data-outside-edge="left">左外侧</button>
+        <button type="button" class="button subtle" data-outside-edge="right">右外侧</button>
+        <button type="button" class="button subtle" data-outside-edge="top" data-inside="true">上内侧</button>
+        <button type="button" class="button subtle" data-outside-edge="top" data-inside="false">上外侧</button>
+      </div>
+    </div>
+    <p id="settings-shortcut" class="settings-shortcut"></p>
+    <p id="settings-status" class="settings-status" role="status" hidden></p>
+  </dialog>
+  <button id="floating-ball" type="button" aria-label="展开代码预览" title="单击展开代码预览" hidden>
+    <span aria-hidden="true">‹›</span>
+  </button>
 </body>
 </html>

@@ -2,7 +2,7 @@
 
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { findDockAnchor, placeDock } = require('../lib/dock-geometry.cjs');
+const { findDockAnchor, placeDock, fitDockSize } = require('../lib/dock-geometry.cjs');
 
 const panelSize = { width: 360, height: 300 };
 const target = { x: 100, y: 200, width: 800, height: 600 };
@@ -76,13 +76,61 @@ test('an existing left overhang can snap flush within the visible-width limit', 
   assert.equal(findDockAnchor({ ...panel, x: -83 }, hostTooFarLeft, areas), null);
 });
 
-test('the overhang flag is only proposed for an already left-clipped panel', () => {
+test('the overhang flag is only proposed for an already clipped panel on its outer side', () => {
   const areas = [{ x: 0, y: 0, width: 1440, height: 852 }];
   const host = { x: 350, y: 100, width: 700, height: 600 };
   const panel = { x: 0, y: 210, ...panelSize };
   assert.equal(findDockAnchor(panel, host, areas), null);
 
   const rightHost = { ...host, width: 750 };
-  const outsideRight = { edge: 'right', inside: false, offset: 110, allowOverhang: true };
-  assert.equal(placeDock(panel, rightHost, areas, outsideRight), null);
+  const panelAtRightBoundary = { ...panel, x: areas[0].width - panel.width };
+  assert.equal(findDockAnchor(panelAtRightBoundary, rightHost, areas), null);
+});
+
+test('right outside overhang snaps within the same bounds as left outside', () => {
+  const areas = [{ x: 0, y: 0, width: 1440, height: 852 }];
+  const host = { x: 42, y: 68, width: 1090, height: 760 };
+  const panel = { x: 1129, y: 93, width: 363, height: 722 };
+  const strict = { edge: 'right', inside: false, offset: 25 };
+  const allowed = { ...strict, allowOverhang: true };
+
+  assert.deepEqual(findDockAnchor(panel, host, areas), allowed);
+  assert.deepEqual(placeDock(panel, host, areas, allowed), { ...panel, x: 1132 });
+  assert.equal(placeDock(panel, host, areas, strict), null);
+
+  const hostTooFarRight = { ...host, x: 70 };
+  assert.equal(placeDock(panel, hostTooFarRight, areas, allowed), null);
+  assert.equal(findDockAnchor({ ...panel, x: 1160 }, hostTooFarRight, areas), null);
+});
+
+test('auto size fills the visible Codex edge and preserves the perpendicular size when possible', () => {
+  const areas = [{ x: 0, y: 0, width: 1440, height: 852 }];
+  const host = { x: 380, y: -20, width: 500, height: 920 };
+  const panel = { x: 890, y: 15, width: 425, height: 475 };
+
+  const right = { edge: 'right', inside: false, offset: 36 };
+  assert.deepEqual(fitDockSize(panel, host, areas, right), { x: 880, y: 16, width: 425, height: 836 });
+
+  const left = { edge: 'left', inside: false, offset: 0 };
+  assert.deepEqual(fitDockSize(panel, host, areas, left), { x: 0, y: 0, width: 380, height: 852 });
+  assert.equal(fitDockSize(panel, { ...host, x: 350 }, areas, left), null);
+
+  const leftOverhang = { ...left, allowOverhang: true };
+  assert.deepEqual(fitDockSize(panel, { ...host, x: 310 }, areas, leftOverhang), {
+    x: -72, y: 0, width: 382, height: 852,
+  });
+  assert.equal(fitDockSize(panel, { ...host, x: 280 }, areas, leftOverhang), null);
+});
+
+test('auto size fills horizontal edges, clamping the saved offset to keep the panel usable', () => {
+  const area = [{ x: -700, y: 0, width: 1300, height: 1250 }];
+  const host = { x: -750, y: 420, width: 900, height: 420 };
+  const panel = { x: 30, y: 839, width: 425, height: 480 };
+
+  assert.deepEqual(fitDockSize(panel, host, area, { edge: 'bottom', inside: false, offset: 400 }), {
+    x: -350, y: 840, width: 500, height: 410,
+  });
+  assert.deepEqual(fitDockSize(panel, host, area, { edge: 'top', inside: true, offset: 700 }), {
+    x: -210, y: 420, width: 360, height: 420,
+  });
 });

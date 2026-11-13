@@ -2,14 +2,14 @@
   color-scheme: dark;
   font-family: Inter, 'Segoe UI', 'Microsoft YaHei UI', sans-serif;
   font-size: 13px;
-  color: #e3e9f2;
+  color: #e5e7eb;
   background: transparent;
-  --surface: #111a28;
-  --raised: #172233;
-  --border: #273548;
-  --text: #e3e9f2;
-  --muted: #a2b0c4;
-  --faint: #8899b1;
+  --surface: #181a1e;
+  --raised: #24272d;
+  --border: #35383e;
+  --text: #e5e7eb;
+  --muted: #aeb4be;
+  --faint: #9199a6;
   --accent: #6ce0cd;
   --success: #7ee0a8;
   --danger: #ffa5ad;
@@ -19,15 +19,21 @@
 *, *::before, *::after { box-sizing: border-box; }
 [hidden] { display: none !important; }
 body {
+  padding-inline: var(--clipped-left, 0px) var(--clipped-right, 0px);
   display: grid;
   grid-template-rows: 44px 43px minmax(0, 1fr) 25px;
   height: 100vh;
   margin: 0;
   overflow: hidden;
-  border: 1px solid #8aa6c158;
+  border: 1px solid #45494f;
   border-radius: 11px;
-  background: #0b1421c9;
+  background: #181a1ee8;
 }
+body[data-dock-attached="true"]:not(.ball-collapsed) { border-radius: 0; box-shadow: none; }
+body[data-dock-attached="true"][data-dock-edge="right"]:not(.ball-collapsed) { border-left-width: 0; }
+body[data-dock-attached="true"][data-dock-edge="left"]:not(.ball-collapsed) { border-right-width: 0; }
+body[data-dock-attached="true"][data-dock-edge="top"]:not(.ball-collapsed) { border-bottom-width: 0; }
+body[data-dock-attached="true"][data-dock-edge="bottom"]:not(.ball-collapsed) { border-top-width: 0; }
 button, input, select { font: inherit; }
 button { cursor: pointer; }
 button:disabled, select:disabled, input:disabled { cursor: default; opacity: .55; }
@@ -49,7 +55,11 @@ button:disabled, select:disabled, input:disabled { cursor: default; opacity: .55
   gap: 14px;
   padding: 0 18px;
 }
-.topbar { background: #40577a25; border-bottom: 1px solid var(--border); }
+.topbar { background: #202226a8; border-bottom: 1px solid var(--border); }
+body[data-dock-attached="true"] .topbar .brand-mark { display: none; }
+body[data-dock-attached="true"] .topbar .brand h1 { color: var(--muted); font-size: 13px; font-weight: 550; }
+body[data-dock-attached="true"] .topbar .button { min-height: 28px; padding-inline: 8px; background: transparent; }
+body[data-dock-attached="true"] .topbar #dock-label { font-size: 11px; }
 .drag-region { -webkit-app-region: drag; }
 .drag-region button { -webkit-app-region: no-drag; }
 .brand, .toolbar-actions, .repo-context, .scope-form {
@@ -449,6 +459,48 @@ input::placeholder { color: #93a5be; }
 .codex-status { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; }
 .status-light { width: 7px; height: 7px; border-radius: 50%; background: #7b879a; }
 .codex-status.available .status-light { background: #6cdaa9; }
+
+.settings-button { font-size: 15px; }
+.settings-dialog {
+  width: min(350px, calc(100% - 22px));
+  max-height: calc(100% - 22px);
+  padding: 0 14px 12px;
+  border: 1px solid #405672;
+  border-radius: 10px;
+  background: #142031;
+  color: var(--text);
+  box-shadow: 0 14px 45px #0007;
+}
+.settings-dialog::backdrop { background: #050b16a0; }
+.settings-heading, .settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.settings-heading { min-height: 47px; }
+.settings-heading h2 { margin: 0; font-size: 15px; }
+.settings-row { min-height: 53px; border-top: 1px solid var(--border); font-size: 12px; }
+.settings-row small { display: block; margin-top: 5px; color: var(--muted); }
+.setting-switch {
+  appearance: none;
+  position: relative;
+  flex: 0 0 35px;
+  width: 35px;
+  height: 20px;
+  margin: 0;
+  border: 1px solid #5c718e;
+  border-radius: 12px;
+  background: #25344a;
+  cursor: pointer;
+}
+.setting-switch::after { position: absolute; top: 3px; left: 3px; width: 12px; height: 12px; border-radius: 50%; background: #b7c6dc; content: ''; }
+.setting-switch:checked { border-color: #70dccc; background: #347d73; }
+.setting-switch:checked::after { left: 18px; background: #e1fff9; }
+.settings-edges { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.settings-edges .button { min-height: 29px; font-size: 11px; }
+.settings-shortcut { margin: 8px 0 2px; color: var(--muted); font-size: 11px; }
+.settings-status { margin: 5px 0 0; color: var(--danger); font-size: 11px; }
 
 @media (max-width: 770px) {
   .topbar, .context, .statusbar { padding-inline: 10px; }
